@@ -1,0 +1,35 @@
+services:
+  # Backend Service (FastAPI)
+  - type: web
+    name: fundamentos-backend
+    env: python
+    region: oregon
+    plan: free
+    buildCommand: cd backend && pip install -r requirements.txt
+    startCommand: cd backend && uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: BRAPI_TOKEN
+        sync: false # User will need to add this in Render dashboard
+
+  # Frontend Service (React Static Site)
+  - type: static
+    name: fundamentos-frontend
+    env: static
+    region: oregon
+    plan: free
+    buildCommand: cd frontend && pnpm install && pnpm build
+    staticPublishPath: frontend/dist/public
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    envVars:
+      - key: NODE_VERSION
+        value: 20.11.0
+      - key: VITE_API_URL
+        fromService:
+          type: web
+          name: fundamentos-backend
+          property: url
