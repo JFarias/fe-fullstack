@@ -22,9 +22,10 @@ services:
     plan: free
     rootDir: frontend
     buildCommand: pnpm install && pnpm build
-    startCommand: NODE_ENV=production node server/index.ts
+    # FIXED: Run the compiled JS file, not the TS source
+    startCommand: NODE_ENV=production node dist/index.js
     envVars:
-      # UPGRADED: Node 22.13.0 is required for Vite 7's crypto features
+      # Node 22.13.0 is required for Vite 7's crypto features
       - key: NODE_VERSION
         value: 22.13.0
       # We pass the internal address of the backend to the frontend server
