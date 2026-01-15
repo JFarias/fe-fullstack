@@ -5,7 +5,7 @@ services:
     env: python
     region: oregon
     plan: free
-    rootDir: backend  # Assumes 'backend' folder is at the root of the repo
+    rootDir: backend
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     envVars:
@@ -20,12 +20,13 @@ services:
     env: node
     region: oregon
     plan: free
-    rootDir: frontend  # Assumes 'frontend' folder is at the root of the repo
+    rootDir: frontend
     buildCommand: pnpm install && pnpm build
     startCommand: NODE_ENV=production node server/index.ts
     envVars:
+      # UPGRADED: Node 22.13.0 is required for Vite 7's crypto features
       - key: NODE_VERSION
-        value: 20.11.0
+        value: 22.13.0
       # We pass the internal address of the backend to the frontend server
       - key: BACKEND_URL
         fromService:
