@@ -4,6 +4,7 @@ from datetime import date, timedelta
 from typing import Any, Dict, List, Optional
 import math
 import statistics
+import concurrent.futures
 
 from app.core.config import (
     TTL_BRAPI_HISTORY, TTL_BRAPI_QUOTE, TTL_EXPECTATIONS, TTL_SGS_DAILY, TTL_SGS_SLOW
@@ -57,13 +58,21 @@ def _cached_fetch(key: str, ttl: int, fn):
     fresh = cache_get_fresh(key)
     if fresh:
         return fresh, {"hit": True, "stale": False, "from_fallback": False, "ttl_seconds": ttl, "last_known_at": cache_last_known_at_iso(key)}
-    data = fn()
-    if data is not None:
-        cache_set(key, data, ttl_seconds=ttl)
-        return data, {"hit": False, "stale": False, "from_fallback": False, "ttl_seconds": ttl, "last_known_at": cache_last_known_at_iso(key)}
+    
+    # If not fresh, we execute the function.
+    # In the parallel version, this function is called inside a thread.
+    try:
+        data = fn()
+        if data is not None:
+            cache_set(key, data, ttl_seconds=ttl)
+            return data, {"hit": False, "stale": False, "from_fallback": False, "ttl_seconds": ttl, "last_known_at": cache_last_known_at_iso(key)}
+    except Exception as e:
+        print(f"Error fetching {key}: {e}")
+
     last_known = cache_get_last_known(key)
     if last_known is not None:
         return last_known, {"hit": False, "stale": True, "from_fallback": True, "ttl_seconds": ttl, "last_known_at": cache_last_known_at_iso(key)}
+    
     return None, {"hit": False, "stale": True, "from_fallback": False, "ttl_seconds": ttl, "last_known_at": None}
 
 def build_homepage_payload() -> Dict[str, Any]:
@@ -72,33 +81,47 @@ def build_homepage_payload() -> Dict[str, Any]:
     start_2y = today - timedelta(days=900)
     start_10y = today - timedelta(days=3650)
 
-    # SGS (cache)
-    selic_points, selic_cache = _cached_fetch(
-        "sgs:selic",
-        TTL_SGS_DAILY,
-        lambda: fetch_sgs_series(SGS_CODES["selic"], start_90d, today)
-    )
-    ipca_points, ipca_cache = _cached_fetch(
-        "sgs:ipca",
-        TTL_SGS_SLOW,
-        lambda: fetch_sgs_series(SGS_CODES["ipca_mm"], start_2y, today)
-    )
-    usd_points, usd_cache = _cached_fetch(
-        "sgs:usdbrl",
-        TTL_SGS_DAILY,
-        lambda: fetch_sgs_series(SGS_CODES["usdbrl"], start_90d, today)
-    )
-    unemp_points, unemp_cache = _cached_fetch(
-        "sgs:unemployment",
-        TTL_SGS_SLOW,
-        lambda: fetch_sgs_series(SGS_CODES["unemployment"], start_10y, today)
-    )
-    gdp_points, gdp_cache = _cached_fetch(
-        "sgs:gdp",
-        TTL_SGS_SLOW,
-        lambda: fetch_sgs_series(SGS_CODES["gdp"], start_10y, today)
-    )
+    # Define tasks for parallel execution
+    # Each task returns (data, cache_info)
+    tasks = {}
 
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        # SGS
+        tasks["selic"] = executor.submit(_cached_fetch, "sgs:selic", TTL_SGS_DAILY, lambda: fetch_sgs_series(SGS_CODES["selic"], start_90d, today))
+        tasks["ipca"] = executor.submit(_cached_fetch, "sgs:ipca", TTL_SGS_SLOW, lambda: fetch_sgs_series(SGS_CODES["ipca_mm"], start_2y, today))
+        tasks["usd"] = executor.submit(_cached_fetch, "sgs:usdbrl", TTL_SGS_DAILY, lambda: fetch_sgs_series(SGS_CODES["usdbrl"], start_90d, today))
+        tasks["unemp"] = executor.submit(_cached_fetch, "sgs:unemployment", TTL_SGS_SLOW, lambda: fetch_sgs_series(SGS_CODES["unemployment"], start_10y, today))
+        tasks["gdp"] = executor.submit(_cached_fetch, "sgs:gdp", TTL_SGS_SLOW, lambda: fetch_sgs_series(SGS_CODES["gdp"], start_10y, today))
+        
+        # BRAPI
+        tasks["ibov_quote"] = executor.submit(_cached_fetch, "brapi:quote:^BVSP", TTL_BRAPI_QUOTE, lambda: fetch_brapi_quote(BRAPI_TICKERS["ibov"]))
+        tasks["ibov_hist"] = executor.submit(_cached_fetch, "brapi:hist:^BVSP:1mo:1d", TTL_BRAPI_HISTORY, lambda: fetch_brapi_history_daily(BRAPI_TICKERS["ibov"], range_="1mo", interval="1d"))
+        tasks["usd_hist"] = executor.submit(_cached_fetch, "brapi:hist:USDBRL:1mo:1d", TTL_BRAPI_HISTORY, lambda: fetch_brapi_history_daily(BRAPI_TICKERS["usdbrl"], range_="1mo", interval="1d"))
+        
+        # Expectations
+        # Note: get_cached_inflation_expectations_12m handles its own caching logic internally differently, 
+        # but for consistency we can just call it directly as it's fast (it reads from internal cache or fetches)
+        # However, to be safe, we run it in thread too.
+        tasks["expectations"] = executor.submit(lambda: get_cached_inflation_expectations_12m("IPCA", True, TTL_EXPECTATIONS))
+
+        # Wait for all
+        concurrent.futures.wait(tasks.values())
+
+    # Collect results
+    selic_points, selic_cache = tasks["selic"].result()
+    ipca_points, ipca_cache = tasks["ipca"].result()
+    usd_points, usd_cache = tasks["usd"].result()
+    unemp_points, unemp_cache = tasks["unemp"].result()
+    gdp_points, gdp_cache = tasks["gdp"].result()
+    
+    ibov_quote, ibov_quote_cache = tasks["ibov_quote"].result()
+    ibov_hist, ibov_hist_cache = tasks["ibov_hist"].result()
+    usd_hist, usd_hist_cache = tasks["usd_hist"].result()
+    
+    exp_bundle = tasks["expectations"].result()
+    expectations = exp_bundle["data"]
+
+    # Process Data
     selic_last, selic_prev = last_and_prev(selic_points or [])
     ipca_last, ipca_prev = last_and_prev(ipca_points or [])
     usd_last, usd_prev = last_and_prev(usd_points or [])
@@ -106,26 +129,6 @@ def build_homepage_payload() -> Dict[str, Any]:
     gdp_last, gdp_prev = last_and_prev(gdp_points or [])
 
     ipca_12m = compute_ipca_12m_from_mm(ipca_points or [])
-
-    # BRAPI quote (cache)
-    ibov_quote, ibov_quote_cache = _cached_fetch(
-        "brapi:quote:^BVSP",
-        TTL_BRAPI_QUOTE,
-        lambda: fetch_brapi_quote(BRAPI_TICKERS["ibov"])
-    )
-
-    # BRAPI history (cache) for vol
-    ibov_hist, ibov_hist_cache = _cached_fetch(
-        "brapi:hist:^BVSP:1mo:1d",
-        TTL_BRAPI_HISTORY,
-        lambda: fetch_brapi_history_daily(BRAPI_TICKERS["ibov"], range_="1mo", interval="1d")
-    )
-
-    usd_hist, usd_hist_cache = _cached_fetch(
-        "brapi:hist:USDBRL:1mo:1d",
-        TTL_BRAPI_HISTORY,
-        lambda: fetch_brapi_history_daily(BRAPI_TICKERS["usdbrl"], range_="1mo", interval="1d")
-    )
 
     ibov_vol = None
     if ibov_hist:
@@ -141,10 +144,6 @@ def build_homepage_payload() -> Dict[str, Any]:
         if usd_points:
             closes = [x["value"] for x in usd_points[-60:]]
             usd_vol = annualized_vol_from_closes(closes)
-
-    # Expectations (cached with expired fallback inside)
-    exp_bundle = get_cached_inflation_expectations_12m("IPCA", True, TTL_EXPECTATIONS)
-    expectations = exp_bundle["data"]
 
     # Real rate approx
     real_rate = None
