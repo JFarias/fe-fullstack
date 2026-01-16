@@ -13,22 +13,30 @@ async function startServer() {
 
   // Proxy API requests to the backend
   // In Render, BACKEND_URL will be provided as "host:port"
-  // We need to prepend http:// if it's missing
   const backendHost = process.env.BACKEND_URL;
   
   if (backendHost) {
     const target = backendHost.startsWith("http") ? backendHost : `http://${backendHost}`;
     console.log(`Setting up API proxy to: ${target}`);
     
+    // Use context matching instead of mounting on /api
+    // This prevents Express from stripping the /api prefix
     app.use(
-      "/api",
-      createProxyMiddleware({
+      createProxyMiddleware(["/api"], {
         target: target,
         changeOrigin: true,
-        pathRewrite: {
-          // Keep the /api prefix or remove it depending on backend. 
-          // Our backend expects /api/homepage/v1, so we keep it.
-        },
+        // No pathRewrite needed because we want to pass /api/... exactly as is
+        on: {
+          proxyReq: (proxyReq, req, res) => {
+            console.log(`[Proxy] ${req.method} ${req.url} -> ${target}${req.url}`);
+          },
+          proxyRes: (proxyRes, req, res) => {
+            console.log(`[Proxy] Response: ${proxyRes.statusCode} ${req.url}`);
+          },
+          error: (err, req, res) => {
+            console.error(`[Proxy] Error: ${err.message}`);
+          }
+        }
       })
     );
   } else {
@@ -36,10 +44,8 @@ async function startServer() {
   }
 
   // Serve static files from dist/public in production
-  const staticPath =
-    process.env.NODE_ENV === "production"
-      ? path.resolve(__dirname, "public")
-      : path.resolve(__dirname, "..", "dist", "public");
+  const staticPath = path.resolve(__dirname, "public");
+  console.log(`Serving static files from: ${staticPath}`);
 
   app.use(express.static(staticPath));
 
