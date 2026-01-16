@@ -24,7 +24,19 @@ async function startServer() {
       createProxyMiddleware({
         target: target,
         changeOrigin: true,
-        // Add logging to debug connection issues
+        // IMPORTANT: We do NOT want to strip /api because the backend expects /api/homepage/v1
+        // However, http-proxy-middleware mounted on /api might strip it depending on version/config.
+        // We explicitly rewrite it to ensure it matches what FastAPI expects.
+        pathRewrite: (path, req) => {
+          // If path is /homepage/v1 (stripped), add /api back
+          // If path is /api/homepage/v1 (preserved), keep it
+          // The safest way is to ensure the target path starts with /api
+          
+          // Actually, when using app.use('/api', ...), the 'path' argument here is relative to the mount point.
+          // So if request is /api/foo, path is /foo.
+          // We want to send /api/foo to the backend.
+          return `/api${path}`; 
+        },
         on: {
           proxyReq: (proxyReq, req, res) => {
             console.log(`[Proxy] ${req.method} ${req.url} -> ${target}${proxyReq.path}`);
@@ -43,8 +55,6 @@ async function startServer() {
   }
 
   // Serve static files from dist/public in production
-  // When running compiled dist/index.js, __dirname is .../dist
-  // So public folder is at .../dist/public
   const staticPath = path.resolve(__dirname, "public");
   console.log(`Serving static files from: ${staticPath}`);
 
