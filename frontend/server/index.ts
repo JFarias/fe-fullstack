@@ -19,13 +19,16 @@ async function startServer() {
     const target = backendHost.startsWith("http") ? backendHost : `http://${backendHost}`;
     console.log(`Setting up API proxy to: ${target}`);
     
-    // Use context matching instead of mounting on /api
-    // This prevents Express from stripping the /api prefix
+    // http-proxy-middleware v3 syntax:
+    // We pass a single options object.
+    // We use pathFilter to select which requests to proxy.
+    // We mount it on the root app.use() so Express doesn't strip the path.
     app.use(
-      createProxyMiddleware(["/api"], {
+      createProxyMiddleware({
         target: target,
         changeOrigin: true,
-        // No pathRewrite needed because we want to pass /api/... exactly as is
+        // Only proxy requests that start with /api
+        pathFilter: (path) => path.startsWith("/api"),
         on: {
           proxyReq: (proxyReq, req, res) => {
             console.log(`[Proxy] ${req.method} ${req.url} -> ${target}${req.url}`);
